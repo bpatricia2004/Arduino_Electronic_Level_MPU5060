@@ -1,0 +1,242 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+/*
+  Electronic Level
+  mpu-6050-level.ino
+  Uses MPU-6050 IMU
+  Displays on 16x2 I2C LCD (NewLiquidCrystal) + LEDs + buzzer
+*/
+
+// Define LCD pinout (NewLiquidCrystal mapping)
+const int  en = 2, rw = 1, rs = 0, d4 = 4, d5 = 5, d6 = 6, d7 = 7, bl = 3;
+
+// Define I2C Address (PCF8574T)
+const int i2c_addr = 0x27;
+
+LiquidCrystal_I2C lcd(i2c_addr, en, rw, rs, d4, d5, d6, d7, bl, POSITIVE);
+
+// Level LEDs
+int levelLED_neg1  = 9;
+int levelLED_neg0  = 10;
+int levelLED_level = 11;
+int levelLED_pos0  = 12;
+int levelLED_pos1  = 13;
+
+// Buzzer
+const int buzzerPin = 8;
+
+// Variables for Gyroscope
+int gyro_x, gyro_y, gyro_z;
+long gyro_x_cal, gyro_y_cal, gyro_z_cal;
+boolean set_gyro_angles;
+
+long acc_x, acc_y, acc_z, acc_total_vector;
+float angle_roll_acc, angle_pitch_acc;
+
+float angle_pitch, angle_roll;
+float angle_pitch_output, angle_roll_output;
+
+// Setup timers and temp variables
+long loop_timer;
+int temp;
+
+// Display counter
+int displaycount = 0;
+
+void setup() {
+  // Start I2C
+  Wire.begin();
+
+  // Optional: slow I2C for stability on breadboards
+  // Wire.setClock(100000);
+
+  // LCD init
+  lcd.begin(16, 2);
+  lcd.setBacklight(HIGH);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Starting...");
+
+  // LEDs as outputs
+  pinMode(levelLED_neg1, OUTPUT);
+  pinMode(levelLED_neg0, OUTPUT);
+  pinMode(levelLED_level, OUTPUT);
+  pinMode(levelLED_pos0, OUTPUT);
+  pinMode(levelLED_pos1, OUTPUT);
+
+  // Buzzer output
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(buzzerPin, LOW);
+
+  // Setup MPU registers
+  setup_mpu_6050_registers();
+
+  // Calibrate gyro (keep sensor still!)
+  gyro_x_cal = gyro_y_cal = gyro_z_cal = 0;
+  for (int cal_int = 0; cal_int < 1000; cal_int++) {
+    read_mpu_6050_data();
+    gyro_x_cal += gyro_x;
+    gyro_y_cal += gyro_y;
+    gyro_z_cal += gyro_z;
+    delay(3); // ~250Hz
+  }
+  gyro_x_cal /= 1000;
+  gyro_y_cal /= 1000;
+  gyro_z_cal /= 1000;
+
+  Serial.begin(115200);
+
+  loop_timer = micros();
+}
+
+void loop() {
+  // Get data from MPU-6050
+  read_mpu_6050_data();
+
+  // Subtract offsets
+  gyro_x -= gyro_x_cal;
+  gyro_y -= gyro_y_cal;
+  gyro_z -= gyro_z_cal;
+
+  // Gyro angle integration (angles are in DEGREES)
+  // 0.0000611 = 1 / (250Hz * 65.5) for 500dps range (65.5 LSB/deg/s)
+  angle_pitch += gyro_x * 0.0000611;  // degrees
+  angle_roll  += gyro_y * 0.0000611;  // degrees
+
+  // Yaw compensation (sin uses radians)
+  angle_pitch += angle_roll * sin(gyro_z * 0.000001066);
+  angle_roll  -= angle_pitch * sin(gyro_z * 0.000001066);
+
+  // Accelerometer angles (degrees)
+  acc_total_vector = sqrt((acc_x * acc_x) + (acc_y * acc_y) + (acc_z * acc_z));
+  angle_pitch_acc = asin((float)acc_y / acc_total_vector) * 57.296;
+  angle_roll_acc  = asin((float)acc_x / acc_total_vector) * -57.296;
+
+  // Optional accel calibration
+  angle_pitch_acc -= 0.0;
+  angle_roll_acc  -= 0.0;
+
+  if (set_gyro_angles) {
+    // Complementary filter to reduce drift
+    angle_pitch = angle_pitch * 0.9996 + angle_pitch_acc * 0.0004;
+    angle_roll  = angle_roll  * 0.9996 + angle_roll_acc  * 0.0004;
+  } else {
+    angle_pitch = angle_pitch_acc;
+    angle_roll  = angle_roll_acc;
+    set_gyro_angles = true;
+  }
+
+  // Extra smoothing (still degrees)
+  angle_pitch_output = angle_pitch_output * 0.9 + angle_pitch * 0.1;
+  angle_roll_output  = angle_roll_output  * 0.9 + angle_roll  * 0.1;
+
+  // === BUZZER: sound if |pitch| > 45 OR |roll| > 45 ===
+  if (fabs(angle_pitch_output) > 45.0 || fabs(angle_roll_output) > 45.0) {
+    tone(buzzerPin, 2000);   // 2kHz beep
+  } else {
+    noTone(buzzerPin);
+  }
+
+  // Update LCD/LEDs slower (every ~0.4s at 250Hz loop)
+  displaycount++;
+
+  if (displaycount > 100) {
+    lcd.clear();
+
+    // Line 1: Pitch in degrees
+    lcd.setCursor(0, 0);
+    lcd.print("P:");
+    lcd.print(angle_pitch_output, 1);
+    lcd.print((char)223); // degree symbol on HD44780
+    lcd.print(" ");
+
+    // Line 2: Roll in degrees
+    lcd.setCursor(0, 1);
+    lcd.print("R:");
+    lcd.print(angle_roll_output, 1);
+    lcd.print((char)223);
+    lcd.print(" ");
+
+    // Keep your LED logic based on pitch (as in original)
+    updateLEDs(angle_pitch_output);
+
+    displaycount = 0;
+  }
+
+  // Keep loop at 250Hz
+  while (micros() - loop_timer < 4000);
+  loop_timer = micros();
+}
+
+// LED logic (unchanged, based on pitch)
+void updateLEDs(float angle_pitch_deg) {
+  if (angle_pitch_deg < -2.01) {
+    digitalWrite(levelLED_neg1, HIGH);
+    digitalWrite(levelLED_neg0, LOW);
+    digitalWrite(levelLED_level, LOW);
+    digitalWrite(levelLED_pos0, LOW);
+    digitalWrite(levelLED_pos1, LOW);
+  } else if ((angle_pitch_deg > -2.00) && (angle_pitch_deg < -1.01)) {
+    digitalWrite(levelLED_neg1, LOW);
+    digitalWrite(levelLED_neg0, HIGH);
+    digitalWrite(levelLED_level, LOW);
+    digitalWrite(levelLED_pos0, LOW);
+    digitalWrite(levelLED_pos1, LOW);
+  } else if ((angle_pitch_deg < 1.00) && (angle_pitch_deg > -1.00)) {
+    digitalWrite(levelLED_neg1, LOW);
+    digitalWrite(levelLED_neg0, LOW);
+    digitalWrite(levelLED_level, HIGH);
+    digitalWrite(levelLED_pos0, LOW);
+    digitalWrite(levelLED_pos1, LOW);
+  } else if ((angle_pitch_deg > 1.01) && (angle_pitch_deg < 2.00)) {
+    digitalWrite(levelLED_neg1, LOW);
+    digitalWrite(levelLED_neg0, LOW);
+    digitalWrite(levelLED_level, LOW);
+    digitalWrite(levelLED_pos0, HIGH);
+    digitalWrite(levelLED_pos1, LOW);
+  } else if (angle_pitch_deg > 2.01) {
+    digitalWrite(levelLED_neg1, LOW);
+    digitalWrite(levelLED_neg0, LOW);
+    digitalWrite(levelLED_level, LOW);
+    digitalWrite(levelLED_pos0, LOW);
+    digitalWrite(levelLED_pos1, HIGH);
+  }
+}
+
+void setup_mpu_6050_registers() {
+  // Wake up MPU-6050
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  // Accelerometer config (+/-8g)
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1C);
+  Wire.write(0x10);
+  Wire.endTransmission();
+
+  // Gyro config (500 dps)
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1B);
+  Wire.write(0x08);
+  Wire.endTransmission();
+}
+
+void read_mpu_6050_data() {
+  Wire.beginTransmission(0x68);
+  Wire.write(0x3B);
+  Wire.endTransmission();
+
+  Wire.requestFrom(0x68, 14);
+  while (Wire.available() < 14);
+
+  acc_x  = (Wire.read() << 8) | Wire.read();
+  acc_y  = (Wire.read() << 8) | Wire.read();
+  acc_z  = (Wire.read() << 8) | Wire.read();
+  temp   = (Wire.read() << 8) | Wire.read();
+  gyro_x = (Wire.read() << 8) | Wire.read();
+  gyro_y = (Wire.read() << 8) | Wire.read();
+  gyro_z = (Wire.read() << 8) | Wire.read();
+}
