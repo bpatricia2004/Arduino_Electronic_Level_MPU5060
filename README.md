@@ -1,4 +1,4 @@
-# Arduino_Electronic_Level_MPU5060
+# Inclination Detector and Alarm based on ATmega328
 Arduino electronic level using MPU6050 IMU with complementary filter and LCD display.
 
 Embedded system that measures tilt angles (Pitch and Roll) using the MPU-6050 IMU and displays the values on an LCD.
